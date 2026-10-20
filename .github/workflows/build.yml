@@ -1,0 +1,71 @@
+name: Build
+on:
+  workflow_dispatch:
+    inputs:
+      addrs:
+        description: "Alamat crash (PC dan LR). Boleh dikosongkan."
+        required: false
+        default: ""
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Pilih zip terbaru
+        run: |
+          best=""; bestt=0
+          for z in emus3ds-audiofix.zip virtuanes-fix.zip; do
+            if [ -f "$z" ]; then
+              t=$(git log -1 --format=%ct -- "$z")
+              echo "$z -> $t"
+              if [ "$t" -ge "$bestt" ]; then best="$z"; bestt="$t"; fi
+            fi
+          done
+          test -n "$best" || { echo "Tidak ada file zip kode"; exit 1; }
+          echo "Memakai $best"
+          unzip -q -o "$best"
+      - name: Patch lama (aman jika tidak ada)
+        run: sed -i '/NDSP buffer submitted/d' emus3ds-audiofix/src/3ds/3dssound.cpp || true
+      - name: Download old libctru
+        run: |
+          git clone --depth 1 --branch v1.1.0 https://github.com/devkitPro/libctru oldctru
+          sed -i 's/-Werror//g' oldctru/libctru/Makefile
+          sed -i '/source\/services\/soc/d' oldctru/libctru/Makefile
+          rm -f oldctru/libctru/include/sys/select.h
+      - name: Build
+        run: |
+          docker run --rm \
+            -v "$PWD:/w" -w /w \
+            -e CTRULIB=/w/oldctru/libctru \
+            devkitpro/devkitarm:20190212 \
+            sh -c "
+              make -k -C oldctru/libctru || true
+              mkdir -p oldctru/libctru/lib
+              arm-none-eabi-ar rcs oldctru/libctru/lib/libctru.a oldctru/libctru/build/*.o
+              cd emus3ds-audiofix && make -k -f virtuanes-make
+            "
+      - name: Cek hasil build
+        run: test -f emus3ds-audiofix/virtuanes_3ds.3dsx
+      - name: Cari alamat crash (opsional)
+        if: ${{ inputs.addrs != '' }}
+        continue-on-error: true
+        env:
+          ADDRS: ${{ inputs.addrs }}
+        run: |
+          docker run --rm -e ADDRS -v "$PWD:/w" -w /w \
+            devkitpro/devkitarm:20190212 \
+            sh -c 'cd emus3ds-audiofix && ELF=$(ls *.elf | head -n1) && arm-none-eabi-addr2line -f -C -i -e "$ELF" $ADDRS > addr2line.txt && arm-none-eabi-nm -C -n "$ELF" > symbols.txt'
+          cat emus3ds-audiofix/addr2line.txt || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: virtuanes_3ds
+          if-no-files-found: warn
+          path: |
+            emus3ds-audiofix/virtuanes_3ds.3dsx
+            emus3ds-audiofix/virtuanes_3ds.smdh
+            emus3ds-audiofix/*.elf
+            emus3ds-audiofix/addr2line.txt
+            emus3ds-audiofix/symbols.txt
